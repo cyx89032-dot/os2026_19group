@@ -1,0 +1,152 @@
+bigsmart@DESKTOP-LFES5VO:~/ucore/lab1$ cd /home/bigsmart/ucore/lab1
+riscv64-unknown-elf-gdb bin/kernel
+GNU gdb (SiFive GDB 9.1.0-2020.08.2) 9.1
+Copyright (C) 2020 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "--host=x86_64-linux-gnu --target=riscv64-unknown-elf".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://github.com/sifive/freedom-tools/issues>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from bin/kernel...
+(gdb) set pagination off
+(gdb) set logging file evidence/gdb-boot.txt
+(gdb) set logging overwrite on
+(gdb) set logging enabled on
+Undefined set logging command: "enabled on".  Try "help set logging".
+(gdb) set architecture riscv:rv64
+The target architecture is assumed to be riscv:rv64
+(gdb) target remote localhost:1234
+Remote debugging using localhost:1234
+0x0000000000001000 in ?? ()
+(gdb) info registers pc
+pc             0x1000   0x1000
+(gdb) x/10i $pc
+=> 0x1000:      auipc   t0,0x0
+   0x1004:      addi    a1,t0,32
+   0x1008:      csrr    a0,mhartid
+   0x100c:      ld      t0,24(t0)
+   0x1010:      jr      t0
+   0x1014:      unimp
+   0x1016:      unimp
+   0x1018:      unimp
+   0x101a:      0x8000
+   0x101c:      unimp
+(gdb) display/i $pc
+1: x/i $pc
+=> 0x1000:      auipc   t0,0x0
+(gdb) si
+0x0000000000001004 in ?? ()
+1: x/i $pc
+=> 0x1004:      addi    a1,t0,32
+(gdb) info registers pc t0 a0 a1 a2
+pc             0x1004   0x1004
+t0             0x1000   4096
+a0             0x0      0
+a1             0x0      0
+a2             0x0      0
+(gdb) si
+0x0000000000001008 in ?? ()
+1: x/i $pc
+=> 0x1008:      csrr    a0,mhartid
+(gdb) info registers pc t0 a0 a1 a2
+pc             0x1008   0x1008
+t0             0x1000   4096
+a0             0x0      0
+a1             0x1020   4128
+a2             0x0      0
+(gdb) set logging on
+Copying output to evidence/gdb-boot.txt.
+Copying debug output to evidence/gdb-boot.txt.
+(gdb) display/i $pc
+2: x/i $pc
+=> 0x1008:      csrr    a0,mhartid
+(gdb) si
+0x000000000000100c in ?? ()
+1: x/i $pc
+=> 0x100c:      ld      t0,24(t0)
+2: x/i $pc
+=> 0x100c:      ld      t0,24(t0)
+(gdb) info registers pc t0 a0 a1 a2
+pc             0x100c   0x100c
+t0             0x1000   4096
+a0             0x0      0
+a1             0x1020   4128
+a2             0x0      0
+(gdb) si
+0x0000000000001010 in ?? ()
+1: x/i $pc
+=> 0x1010:      jr      t0
+2: x/i $pc
+=> 0x1010:      jr      t0
+(gdb) info registers pc t0 a0 a1 a2
+pc             0x1010   0x1010
+t0             0x80000000       2147483648
+a0             0x0      0
+a1             0x1020   4128
+a2             0x0      0
+(gdb) break *0x80200000
+Breakpoint 1 at 0x80200000: file kern/init/entry.S, line 7.
+(gdb) continue
+Continuing.
+
+Breakpoint 1, kern_entry () at kern/init/entry.S:7
+7           la sp, bootstacktop
+1: x/i $pc
+=> 0x80200000 <kern_entry>:     auipc   sp,0x3
+2: x/i $pc
+=> 0x80200000 <kern_entry>:     auipc   sp,0x3
+(gdb) info registers pc
+pc             0x80200000       0x80200000 <kern_entry>
+(gdb) x/6i $pc
+=> 0x80200000 <kern_entry>:     auipc   sp,0x3
+   0x80200004 <kern_entry+4>:   mv      sp,sp
+   0x80200008 <kern_entry+8>:   j       0x8020000a <kern_init>
+   0x8020000a <kern_init>:      auipc   a0,0x3
+   0x8020000e <kern_init+4>:    addi    a0,a0,-2
+   0x80200012 <kern_init+8>:    auipc   a2,0x3
+(gdb) info address kern_entry
+Symbol "kern_entry" is at 0x80200000 in a file compiled without debugging.
+(gdb) 
+Symbol "kern_entry" is at 0x80200000 in a file compiled without debugging.
+(gdb) p/x &bootstacktop
+$1 = 0x80203000
+(gdb) info registers sp
+sp             0x8001bd80       0x8001bd80
+(gdb) x/4i $pc
+=> 0x80200000 <kern_entry>:     auipc   sp,0x3
+   0x80200004 <kern_entry+4>:   mv      sp,sp
+   0x80200008 <kern_entry+8>:   j       0x8020000a <kern_init>
+   0x8020000a <kern_init>:      auipc   a0,0x3
+(gdb) si
+0x0000000080200004 in kern_entry () at kern/init/entry.S:7
+7           la sp, bootstacktop
+1: x/i $pc
+=> 0x80200004 <kern_entry+4>:   mv      sp,sp
+2: x/i $pc
+=> 0x80200004 <kern_entry+4>:   mv      sp,sp
+(gdb) info registers pc
+pc             0x80200004       0x80200004 <kern_entry+4>
+(gdb) x/i $pc
+=> 0x80200004 <kern_entry+4>:   mv      sp,sp
+(gdb) continue
+Continuing.
+set logging enabled off
+detach
+quit
+
+Remote connection closed
+(gdb) set logging enabled off
+Undefined set logging command: "enabled off".  Try "help set logging".
+(gdb) detach
+The program is not being run.
+(gdb) quit
+bigsmart@DESKTOP-LFES5VO:~/ucore/lab1$ 
+bigsmart@DESKTOP-LFES5VO:~/ucore/lab1$ 
