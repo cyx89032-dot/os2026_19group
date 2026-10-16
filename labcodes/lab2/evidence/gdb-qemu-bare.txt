@@ -1,0 +1,44 @@
+Starting program: /opt/riscv/qemu-4.1.1/riscv64-softmmu/qemu-system-riscv64 -machine virt -nographic -bios default -device loader,file=bin/ucore.img,addr=0x80200000 -s
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff79656c0 (LWP 750797)]
+[New Thread 0x7ffff4fff6c0 (LWP 750798)]
+[Switching to Thread 0x7ffff4fff6c0 (LWP 750798)]
+
+Thread 3 "qemu-system-ris" hit Breakpoint 1, get_physical_address (env=env@entry=0x5555562f7e80, physical=physical@entry=0x7ffff4ffe830, prot=prot@entry=0x7ffff4ffe82c, addr=addr@entry=4096, access_type=access_type@entry=2, mmu_idx=mmu_idx@entry=3) at /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:158
+158	{
+$41 = 0x1000
+$42 = 0x0
+$43 = 3
+#0  get_physical_address (env=env@entry=0x5555562f7e80, physical=physical@entry=0x7ffff4ffe830, prot=prot@entry=0x7ffff4ffe82c, addr=addr@entry=4096, access_type=access_type@entry=2, mmu_idx=mmu_idx@entry=3) at /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:158
+#1  0x00005555558cfc10 in riscv_cpu_tlb_fill (cs=0x5555562ef470, address=4096, size=0, access_type=MMU_INST_FETCH, mmu_idx=3, probe=false, retaddr=0) at /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:451
+#2  0x00005555558514bf in tlb_fill (cpu=cpu@entry=0x5555562ef470, addr=addr@entry=4096, size=size@entry=0, access_type=access_type@entry=MMU_INST_FETCH, mmu_idx=mmu_idx@entry=3, retaddr=retaddr@entry=0) at /opt/riscv/qemu-4.1.1/accel/tcg/cputlb.c:878
+#3  0x0000555555854b65 in get_page_addr_code (env=0x5555562f7e80, addr=addr@entry=4096) at /opt/riscv/qemu-4.1.1/accel/tcg/cputlb.c:1032
+#4  0x000055555586f798 in tb_htable_lookup (cpu=cpu@entry=0x5555562ef470, pc=pc@entry=4096, cs_base=cs_base@entry=0, flags=flags@entry=3, cf_mask=4278714368) at /opt/riscv/qemu-4.1.1/accel/tcg/cpu-exec.c:339
+#5  0x0000555555870001 in tb_lookup__cpu_state (cf_mask=<optimized out>, flags=<synthetic pointer>, cs_base=<synthetic pointer>, pc=<synthetic pointer>, cpu=0x5555562ef470) at /opt/riscv/qemu-4.1.1/include/exec/tb-lookup.h:43
+(More stack frames follow...)
+Run till exit from #0  get_physical_address (env=env@entry=0x5555562f7e80, physical=physical@entry=0x7ffff4ffe830, prot=prot@entry=0x7ffff4ffe82c, addr=addr@entry=4096, access_type=access_type@entry=2, mmu_idx=mmu_idx@entry=3) at /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:158
+0x00005555558cfc10 in riscv_cpu_tlb_fill (cs=0x5555562ef470, address=4096, size=0, access_type=MMU_INST_FETCH, mmu_idx=3, probe=false, retaddr=0) at /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:451
+451	    ret = get_physical_address(env, &pa, &prot, address, access_type, mmu_idx);
+Value returned is $44 = 0
+$45 = 0x1000
+Temporary breakpoint 8 at 0x5555558cfd3e: file /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c, line 472.
+Continuing.
+
+Thread 3 "qemu-system-ris" hit Temporary breakpoint 8, riscv_cpu_tlb_fill (cs=0x5555562ef470, address=4096, size=<optimized out>, access_type=MMU_INST_FETCH, mmu_idx=3, probe=<optimized out>, retaddr=0) at /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:472
+472	        tlb_set_page(cs, address & TARGET_PAGE_MASK, pa & TARGET_PAGE_MASK,
+$46 = 0x1000
+Continuing.
+[Thread 0x7ffff4fff6c0 (LWP 750798) exited]
+[Thread 0x7ffff7c86f40 (LWP 750796) exited]
+[Thread 0x7ffff79656c0 (LWP 750797) exited]
+[New process 750796]
+[Inferior 1 (process 750796) exited normally]
+No symbol "address" in current context.
+No symbol "pa" in current context.
+No symbol "mmu_idx" in current context.
+Temporary breakpoint 9 at 0x555555854b01: file /opt/riscv/qemu-4.1.1/accel/tcg/cputlb.c, line 1036.
+The program is not being run.
+No symbol "addr" in current context.
+No symbol "entry" in current context.
+No symbol "entry" in current context.

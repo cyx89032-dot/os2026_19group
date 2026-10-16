@@ -1,0 +1,5 @@
++ cc kern/mm/buddy_check.c
++ cc kern/mm/buddy_pmm.c
++ cc kern/mm/pmm.c
++ ld bin/kernel
+riscv64-unknown-elf-objcopy bin/kernel --strip-all -O binary bin/ucore.img
