@@ -466,3 +466,435 @@ QEMU 源码调试用普通 gdb 打开带符号的 QEMU，使用条件断点和�
 
 说明测试前提：本课程默认 128MiB RAM，描述符不超过 32768 个，可用页至少 128 且存在对齐的 8 页范围。32KiB 静态测试位图增加内核 BSS，减少可用页属正常现象。内核正常测试不故意触发致命断言；非法释放应另用隔离测试进程检查，不能假称本测试已覆盖所有错误路径。
 ```
+
+
+<!-- LAB2_GDB_SLUB_TLB_SUPPLEMENT_BEGIN -->
+
+## 补充专题：GDB 调试过程、SLUB 原理及软硬件 TLB 对比
+
+### 一、说明与证据范围
+
+本节将实际完成的实验、源码分析和扩展设计分开说明。已完成的内容包括物理页初始化、Best-Fit、Buddy 及对应测试，还有 QEMU 4.1.1 地址翻译和软件 TLB 调试。课程 `make grade` 得到 20/20，检查项为 page init 和 best fit；该分数不能证明 SLUB 已实现，也不能代替 Buddy 和 MMU 的独立验证。
+
+**SLUB 在本实验中属于原理分析和扩展设计，没有实现或运行通过的证据。** 下文给出的 SLUB 伪代码和测试方案不能作为已完成的功能记入结果。
+
+调试证据见：
+
+- [高地址翻译与软件 TLB 调试记录](evidence/gdb-qemu-mmu.txt)。
+- [启动地址直通与 TLB 填充完整记录](evidence/gdb-qemu-bare-complete.txt)。
+- [启动验证脚本](evidence/bare-final-check.gdb)。
+- [课程评分记录](evidence/grade-lab2-final.txt)、[Buddy 测试记录](evidence/run-buddy.txt)。
+
+后面的地址数值来自本次记录。重新编译可能改变内核符号地址，重新启动 QEMU 可能改变宿主指针，因此应重新读取变量，不应把历史指针直接用于新进程。
+
+### 二、GDB 到底在调试什么
+
+本次使用普通宿主 `gdb` 调试 QEMU 进程，从而观察 QEMU 如何模拟 RISC-V MMU。它与用 `riscv64-unknown-elf-gdb bin/kernel` 连接远程调试端口、观察内核指令和寄存器不是同一种调试方式。
+
+| 方式 | 调试对象 | 可以直接观察的内容 |
+|---|---|---|
+| 宿主 GDB 启动 QEMU | 在宿主上执行的 QEMU 程序 | `get_physical_address`、软件 TLB 表项、宿主指针 |
+| RISC-V GDB 连接 QEMU 调试端口 | QEMU 中运行的客体内核 | RISC-V 指令、客体寄存器、内核函数 |
+
+本次证据属于第一种方式，没有把双 GDB 联合调试作为已完成项目。QEMU 的 `-s` 只开放调试端口，并不会自动建立第二个调试会话；观察 QEMU 自身 C 函数不依赖该选项。
+
+### 三、GDB 调试的具体步骤与结果
+
+#### 3.1 准备可调试程序和日志
+
+在 Linux 终端进入实验目录、编译内核，并启动带符号的 QEMU：
+
+```bash
+cd /home/bigsmart/os2026_19group/labcodes/lab2
+make
+gdb -q --args /opt/riscv/qemu-4.1.1/riscv64-softmmu/qemu-system-riscv64 \
+  -machine virt -nographic -bios default \
+  -device loader,file=bin/ucore.img,addr=0x80200000
+```
+
+这里选用源码目录中带调试信息的 QEMU 可执行文件。只有内核带符号，不能满足调试 QEMU 内部函数的需要。以下命令在 `(gdb)` 提示符后逐条执行；不把多条命令当成一条粘贴。
+
+```gdb
+set pagination off
+set logging file evidence/gdb-qemu-replay.txt
+set logging overwrite on
+set logging enabled on
+handle SIGPIPE nostop noprint
+```
+
+日志使用新的 replay 文件，避免覆盖原实验记录。`set logging enabled on` 适用于本次宿主 GDB；之前 RISC-V GDB 9.1 不接受这一形式时使用 `set logging on`。`handle SIGPIPE` 只是调试器的信号处理设置，不是 MMU 功能。
+
+#### 3.2 在地址翻译入口停下
+
+```gdb
+break get_physical_address if addr >= 0xffffffffc0200000
+run
+info args
+bt 6
+p/x addr
+p/x env->satp
+p mmu_idx
+set $walk_va = addr
+set $walk_pa_ptr = physical
+```
+
+断点选择内核高地址访问，避免启动 ROM 和固件的多次低地址访问干扰。实际停下时得到：
+
+| 变量 | 本次观测值 | 含义 |
+|---|---|---|
+| `addr` | `0xffffffffc02000d8` | 要翻译的客体虚拟地址 |
+| `env->satp` | `0x8000000000080205` | Sv39 模式，根页表物理页号为 `0x80205` |
+| `mmu_idx` | `1` | 本次 S 模式访问所用的 MMU 索引 |
+| `access_type` | `2`，调用栈显示 `MMU_INST_FETCH` | 本次是取指访问 |
+
+调用关系从外到内为：`get_page_addr_code → tlb_fill → riscv_cpu_tlb_fill → get_physical_address`。这说明 QEMU 在取指地址查询遇到软件 TLB 未命中后，进入架构相关的页表遍历。
+
+`physical` 是输出参数指针；保存它是为了在函数返回后读取计算结果。它是宿主指针，不是待访问的客体物理地址。
+
+#### 3.3 观察 Sv39 页表读取
+
+本版本的页表读取位于 `target/riscv/cpu_helper.c` 的第 252 行附近：
+
+```gdb
+tbreak /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:252
+continue
+p/x base
+p levels
+p ptshift
+p/x idx
+p/x pte_addr
+next
+p/x pte
+```
+
+行断点停在执行该行之前。因此要执行读取语句后再观察 `pte`。上述行号只适用于本实验的 QEMU 4.1.1 源码；其他版本应先用 `list` 查找相应语句。
+
+Sv39 虚拟地址由 VPN[2]、VPN[1]、VPN[0] 各 9 位和页内偏移 12 位组成。根页表地址由 `satp` 的 PPN 左移 12 位得到。本次计算为：
+
+```text
+根页表物理地址 = 0x80205 << 12 = 0x80205000
+顶级索引 VPN[2] = (VA >> 30) & 0x1ff = 0x1ff = 511
+PTE 地址 = 0x80205000 + 511 × 8 = 0x80205ff8
+读取 PTE = 0x200000cf
+PTE 中的物理页号 = PTE >> 10 = 0x80000
+```
+
+PTE 低位 `0xcf` 表示 V、R、W、X、A、D 为 1，U、G 为 0。V 表示有效，R/W/X 表示访问权限，U 表示用户权限，G 表示全局映射，A/D 分别表示访问和脏状态。低 10 位还包含供软件使用的 RSW 位；高位中的 PPN 提供物理页号。不要将管理空闲物理页的 `struct Page` 与硬件格式的页表项 PTE 混为一谈。
+
+R/W/X 不全为零说明这是叶子项。本次在顶级就找到叶子，表示 1 GiB 大页映射，因此**没有实际遍历三层页表**。Sv39 支持最多三级，不代表每次翻译必须读三个 PTE。
+
+对应内核 `kern/init/entry.S` 的启动页表通过前面空置 511 项、最后一项写入 `(0x80000 << 10) | 0xcf` 建立该高地址映射，再设置 `satp` 并执行地址翻译同步操作。
+
+QEMU 的页表遍历还检查地址合法性、PTE 有效位、叶子权限、用户/监管访问限制以及大页物理地址对齐。非叶子项继续寻找下一级页表，非法项或权限不符返回失败。代码也处理 A/D 位，但本次 PTE 的 A/D 已置位，不能说本次实测了 A/D 从 0 到 1 的更新过程。
+
+#### 3.4 检查最终物理地址，区分页基址与完整地址
+
+先计算理论结果，再让翻译函数返回：
+
+```gdb
+set $expected_pa = 0x80000000 + ($walk_va & 0x3fffffffULL)
+finish
+p/x *$walk_pa_ptr
+p/x ($walk_va & 0xfff)
+p/x (*$walk_pa_ptr + ($walk_va & 0xfff))
+p ((*$walk_pa_ptr + ($walk_va & 0xfff)) == $expected_pa)
+```
+
+本次结果：函数返回 0，输出 `0x80200000`；页内偏移为 `0xd8`；相加得到 `0x802000d8`，与理论结果比较为 1。
+
+本版本分页路径的核心语句为：
+
+```c
+vpn = addr >> PGSHIFT;
+*physical = (ppn | (vpn & ((1L << ptshift) - 1))) << PGSHIFT;
+```
+
+顶级叶子将虚拟地址的低级 VPN 补入物理页号，保留大页内对应的 4 KiB 页位置。最后左移 12 位，所以该路径返回的是 4 KiB 物理页基址。完整访问地址需要加页内偏移。
+
+此前调试曾直接把输出与 `0x802000d8` 比较，得到不相等；这不是翻译失败，而是把页基址与完整地址混用。后续根据源码修正比较并得到一致结果。
+
+#### 3.5 观察软件 TLB 填充
+
+```gdb
+tbreak /opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c:472
+continue
+p/x address
+p/x pa
+p prot
+p mmu_idx
+step
+info args
+```
+
+调用语句将地址按页对齐后传给 `tlb_set_page`：
+
+```c
+tlb_set_page(cs, address & TARGET_PAGE_MASK,
+             pa & TARGET_PAGE_MASK, prot, mmu_idx, TARGET_PAGE_SIZE);
+```
+
+本次参数为：虚拟页基址 `0xffffffffc0200000`，物理页基址 `0x80200000`，权限 `prot=7`，索引 `mmu_idx=1`，软件缓存粒度 `size=4096`。`prot=7` 是 QEMU 的读、写、执行权限组合，不是原始 PTE 数值。
+
+进一步进入 `tlb_set_page_with_attrs`，其主要工作为：
+
+1. 将客体物理页交给 QEMU 地址空间系统，找到对应 RAM、ROM 或 MMIO 区域。
+2. 对可直接访问的内存取得宿主映射位置；对特殊区域设置标记，供慢路径处理。
+3. 查找软件 TLB 槽位，必要时处理原表项和 victim 缓存。
+4. 根据权限形成 `addr_read`、`addr_write`、`addr_code` 等访问标签。
+5. 计算 `addend`，写入表项并更新维护信息。
+
+不同访问标签可带特殊标志，不能不加区分地当作纯虚拟页号。victim 缓存用于保存部分被替换表项；本次分析了有关代码，没有实测 victim 命中分支。
+
+#### 3.6 在填充返回后验证表项
+
+调试时局部变量 `te`、`tn` 曾在当前上下文不可用。变量可见性受当前栈帧、作用域和优化影响，不能因此认定填充失败。本次改在调用者中观察重新取得的 `entry`：
+
+```gdb
+tbreak /opt/riscv/qemu-4.1.1/accel/tcg/cputlb.c:1036
+continue
+info locals
+p/x addr
+p/x *entry
+p/x entry->addr_code
+p (entry->addr_code == (addr & ~0xfffULL))
+p/x entry->addend
+p/x ((unsigned long long)addr + entry->addend)
+set $tlb_va = addr & ~0xfffULL
+```
+
+本次观测：
+
+```text
+客体虚拟地址 addr       = 0xffffffffc02000d8
+取指标签 addr_code     = 0xffffffffc0200000
+标签与对齐虚拟地址相等 = 1
+addend                 = 0x80001fe00000
+addr + addend          = 0x7fffe00000d8（按 64 位无符号运算）
+```
+
+最后的 `0x7fffe00000d8` 是 **QEMU 进程中的宿主虚拟地址**，不是客体物理地址 `0x802000d8`。`addend` 的作用是把客体虚拟地址快速换算成宿主可访问的指针，不是简单保存“客体物理地址减客体虚拟地址”。
+
+在本次取指辅助函数中，随后还会调用 `qemu_ram_addr_from_host_nofail` 将宿主指针转为 QEMU 内部 RAM 地址标识；该标识也不能直接等同于客体物理地址。
+
+#### 3.7 验证后续访问确实命中
+
+填充后的标签相等，只能证明表项内容一致。为证明后续命中，再在查询入口停下：
+
+```gdb
+info breakpoints
+disable 1
+break /opt/riscv/qemu-4.1.1/accel/tcg/cputlb.c:1030 if (addr & ~0xfffULL) == $tlb_va
+continue
+p/x addr
+p/x entry->addr_code
+p (entry->addr_code == (addr & ~0xfffULL))
+next
+frame
+```
+
+`disable 1` 中的编号应以当前 `info breakpoints` 显示的翻译入口断点为准。本次历史会话重复设置了相同位置的断点 6、7；重复断点不是实验必要步骤，复现时只设置一次即可。
+
+实际比较结果为 1，执行 `next` 后从第 1030 行直接到第 1039 行，跳过包含 `tlb_fill` 的未命中分支。这才是本次“再次访问命中软件 TLB”的直接证据。
+
+这里展示的是 `get_page_addr_code` 取指查询路径，不意味着每条客体 load/store 指令都会调用此 C 函数。TCG 还会生成内存访问快路径；翻译块 TB 缓存与地址翻译 TLB 缓存也属于不同机制。
+
+#### 3.8 启动直通地址的对照实验
+
+完整记录中的 `bare-final-check.gdb` 自动完成了启动地址的检查。需要复现时先查看脚本中的日志路径和断点设置，再在实验目录运行：
+
+```bash
+gdb -q -batch -x evidence/bare-final-check.gdb \
+  --args /opt/riscv/qemu-4.1.1/riscv64-softmmu/qemu-system-riscv64 \
+  -machine virt -nographic -bios default \
+  -device loader,file=bin/ucore.img,addr=0x80200000
+```
+
+本次观测为：`addr=0x1000`，`satp=0`，`mmu_idx=3`；翻译返回成功，物理地址为 `0x1000`。随后软件 TLB 填充参数中的虚拟地址和物理地址均为 `0x1000`，填充后 `addr_code=0x1000`，比较为 1，脚本输出 `BARE_TLB_CHECK_PASSED`。
+
+**严格地说，该证据是 M 模式启动取指的直通路径。** 它不是人为切到 S 模式、设置 `satp.MODE=Bare` 后的独立测试。QEMU 仍可用软件 TLB 缓存客体地址到宿主内存区域的访问关系，因此“客体不进行分页”不等于“QEMU 不使用软件 TLB”。
+
+批处理脚本最后主动结束被调试进程；终止提示不代表内核崩溃。之前手动 `continue` 让程序退出后，再查询 `pa` 等局部变量出现 `No symbol`，是因为函数调用上下文已经不存在，而不是这些变量从源码中消失。
+
+#### 3.9 调试结论及边界
+
+本次已经取得页表读取、页基址计算、软件 TLB 填充和后续命中的证据；未独立覆盖权限异常、缺页异常、所有数据读写路径、victim 命中、ASID 切换、多核失效同步及真实硬件性能。报告不把这些未测项目写成测试通过。
+
+### 四、SLUB 的基本原理与流程（原理分析，未实现）
+
+#### 4.1 为什么在 Buddy 上再加一层
+
+Buddy 面向连续物理页块，通常按 2 的幂次页数分配。内核对象往往只有几十或几百字节，若每个对象单独占一页，浪费很大。SLUB 属于 slab 对象分配器：向页分配器申请一页或多页，再划分为多个对象槽位供重复使用。
+
+例如，假设一种缓存使用 64 字节槽位，4 KiB 页面理论上可容纳 64 个槽位。50 字节请求使用一个槽位，槽内剩余 14 字节属于内部碎片。这里忽略了元数据、对齐和调试开销，只是说明基本思想，并非本实验测量结果。
+
+Linux 官方文档说明 slab 使用底层 folio 承载多个对象；部分大尺寸 `kmalloc` 分配不属于 slab。这也说明对象分配层和物理页层需要区分。[Linux Slab Allocation 文档](https://docs.kernel.org/mm/slab.html)
+
+#### 4.2 数据结构分别管理什么
+
+| 概念 | 管理内容 | 不应混淆的对象 |
+|---|---|---|
+| cache（对象缓存） | 某类对象或尺寸等级的大小、对齐与 slab 集合 | CPU 硬件缓存、TLB |
+| slab | 一组底层页面及其对象槽位、使用数量等 | 单个物理页一定等于单个 slab |
+| object | 一次交给调用者使用的小块内存 | Buddy 分配的整页块 |
+| freelist | 可分配对象槽位的链接关系 | 本实验空闲物理页块链表 |
+| partial slab | 一部分对象使用、一部分空闲的 slab | 完全空闲页面 |
+
+full、partial、empty 是理解 slab 使用情况的逻辑状态，不代表实际 Linux SLUB 必须维护三条对应链表。Linux 不同版本的每 CPU 缓存、批量处理及并发机制也会变化。
+
+#### 4.3 分配过程
+
+从概念上可以按以下过程理解：
+
+1. 根据对象类型或请求大小选择合适的 cache，并确定对齐后的槽位大小。
+2. 优先从当前可快速获取的空闲对象中取出一个，更新 freelist 和使用计数。
+3. 当前来源耗尽时，寻找有空闲槽位的 partial slab。
+4. 若现有 slab 都无法满足，向底层页分配器申请新页面，建立 slab 元数据并连接空闲对象。
+5. 返回可用对象指针。底层申请也失败时，按接口约定返回失败，不应返回重复使用或未分配的地址。
+
+以下为教学伪代码，不是已经加入 ucore 的实现：
+
+```text
+allocate_object(cache):
+    object = try_fast_free_object(cache)
+    if object exists: return object
+    slab = find_partial_slab(cache)
+    if slab does not exist:
+        pages = allocate_backing_pages(cache)
+        if pages do not exist: return failure
+        slab = initialize_slots_and_freelist(pages, cache)
+    return take_one_free_object(slab)
+```
+
+Linux 的专用对象缓存接口包括 `kmem_cache_alloc`/`kmem_cache_free`，通用接口包括 `kmalloc`/`kfree`。这些名称用来说明 Linux 的接口思想，不表示本实验已经提供同名接口。释放后再次分配到的对象也不保证自动清零；需要明确的初始化或清零机制。
+
+#### 4.4 释放过程
+
+释放首先根据对象地址找到所属 slab/cache，再将对象归还到对应 freelist，更新计数。full slab 释放一个对象后可成为 partial；最后一个对象释放后 slab 变为空闲，可保留供重用，也可在相应策略下将底层页归还页分配器。
+
+**释放一个小对象通常不会立即释放整页。** 只要页内还有其他有效对象，就不能将该页交给 Buddy，否则会破坏仍在使用的数据。即使所有对象都释放，是否马上回收页面也取决于缓存策略。
+
+并发环境下必须保护 freelist、计数及 slab 状态。真实 Linux SLUB 会使用每 CPU 数据、原子操作和必要的同步机制降低竞争；单核教学伪代码不能直接代表完整的多核实现。
+
+#### 4.5 与本实验代码如何衔接
+
+本实验的 `pmm_manager` 选择物理页分配算法，`alloc_pages`/`free_pages` 提供页级服务。若扩展对象分配器，应在它们之上维护对象缓存，不应把每个小对象直接塞进原来的物理页空闲链表。
+
+`struct Page` 用来描述物理页；需要另行设计 slab 的对象大小、所属 cache、空闲槽位和使用计数等元数据。物理页地址、内核可访问指针和对象地址之间也需要采用已有映射转换，分配物理页本身并不等同于建立任意新虚拟映射。
+
+Buddy 解决页块分配，SLUB 解决页内对象分配，MMU/TLB 解决访问地址翻译。这三者分工不同。
+
+#### 4.6 如果实现 SLUB，应如何测试
+
+以下属于建议测试，不属于现有通过记录：
+
+- 边界大小：1、63、64、65 字节等；零字节请求应先定义明确行为。
+- 对齐与越界：每个对象满足约定对齐，相邻对象写不同模式后互不覆盖。
+- 扩容：分配超过一个 slab 的容量，确认正确申请新页。
+- 复用：释放部分对象后重新分配，计数正确且不重复分配仍在使用的槽位。
+- 回收：全部释放后，检查保留缓存和归还页的策略是否与设计一致。
+- 失败：底层内存耗尽时返回失败，原有对象内容不被破坏。
+- 调试检查：重复释放、跨 cache 释放和非法指针应按设计被检测；不能假设普通释放接口天然具备完整检查。
+
+SLUB 可以提高小对象空间利用率和复用效率，但不会消除所有碎片。尺寸取整、对齐以及只剩少量活跃对象的 partial slab 都会占用额外空间。
+
+### 五、软件 TLB 模拟与真实硬件逻辑的区别
+
+#### 5.1 真实硬件的逻辑
+
+在启用 Sv39 的适用访问模式下，CPU 根据虚拟地址、访问类型及地址空间上下文查询地址翻译缓存。命中且权限满足时，结合页内偏移得到物理地址并继续访问；未命中则需要根据页表取得翻译，成功后缓存结果并重试或继续。
+
+TLB 未命中不是缺页异常。一个合法映射可以因尚未缓存而未命中，随后页表遍历成功；无效 PTE、权限不符等情况才可能产生页故障，其他物理访问限制还可能产生不同异常。操作系统负责建立和更新映射、处理相应异常，不是每次 TLB miss 都要执行操作系统缺页处理函数。
+
+RISC-V 规范约束翻译、权限及同步行为，不要求所有实现具有相同 TLB 容量、相联度、替换策略或物理结构。这里描述的是常见硬件实现的逻辑，而不是某个具体芯片的时序模型。
+
+#### 5.2 QEMU TCG 软件模拟的逻辑
+
+本实验中的流程可表示为：
+
+```text
+客体虚拟地址
+  → 查询 QEMU 软件 TLB
+  → 命中：检查相应标志，使用 addend 等信息走快速访问路径
+  → 未命中：尝试其他缓存路径；必要时模拟 RISC-V 页表遍历
+      → 客体物理地址
+      → QEMU 地址空间查找 RAM/ROM/MMIO
+      → 建立软件 TLB 表项
+      → 继续访问
+```
+
+QEMU 模拟的内存存放在宿主系统提供的内存映射中，所以它不仅要得到客体物理地址，还要找到宿主进程能够访问的位置。普通 RAM 可用指针快路径，MMIO 等区域需要专门处理，不能全部理解成一次普通内存解引用。
+
+#### 5.3 对照表
+
+| 比较点 | 真实硬件 TLB | 本实验 QEMU 软件 TLB |
+|---|---|---|
+| 实现位置 | 处理器地址翻译硬件 | QEMU 进程内的软件数据结构及生成代码 |
+| 主要用途 | 缓存地址翻译及权限，减少页表遍历 | 加速模拟访问，减少模拟页表遍历和内存区域查询 |
+| 地址终点 | 该机器的物理地址空间 | 先到客体物理地址，再关联宿主内存或模拟设备 |
+| 未命中处理 | 常见 Sv39 硬件由页表遍历机制取得翻译 | `riscv_cpu_tlb_fill` 调用 `get_physical_address` 等软件逻辑 |
+| 表项信息 | 物理页号、权限、上下文等，具体结构依实现 | 读写取指标签、`addend`、特殊访问标记等 |
+| 页面大小 | 可支持基础页及大页，缓存形式依实现 | 本次根叶子是 1 GiB 映射，但填充调用传入 4 KiB |
+| 命中演示 | 需要硬件调试或性能观测手段 | GDB 观察标签和分支跳转 |
+| 性能含义 | 实际硬件的容量和周期影响运行 | 不能用本次 GDB 轨迹推断真实 TLB 周期、容量或命中率 |
+
+真实硬件也可能有多级翻译缓存、页表遍历缓存等机制；不能把它概括成与 QEMU 某个数组完全相同。QEMU 的 victim 缓存策略也不代表目标 RISC-V 芯片必然采用相同策略。
+
+#### 5.4 为什么 QEMU 下面还有一层“真正的 TLB”
+
+QEMU 自己是宿主操作系统上的进程。它执行代码、读取宿主指针时，宿主 CPU 仍会进行宿主虚拟地址到宿主物理地址的翻译，并使用宿主硬件 TLB。
+
+因此本次存在两个不同层次：
+
+```text
+QEMU 模拟层：客体虚拟地址 → 客体物理地址 → 宿主虚拟地址
+宿主硬件层：宿主虚拟地址 → 宿主物理地址
+```
+
+`0xffffffffc02000d8 → 0x802000d8` 是客体的翻译结果；`0x7fffe00000d8` 是本次 QEMU 进程访问数据所用的宿主地址。该宿主地址最终对应什么宿主物理页，不是本实验日志直接给出的。
+
+#### 5.5 修改页表后为什么需要同步
+
+页表已经改变，不代表旧的翻译缓存自动失效。RISC-V 使用 `SFENCE.VMA` 对相关地址翻译进行同步，作用范围与指令参数和执行 hart 有关；不能笼统认为改写 `satp` 就必然清除所有旧翻译。
+
+多核系统还需要协调其他 hart，使它们完成必要的翻译同步。QEMU 需要在软件实现中维持相应架构语义，但使用的软件表项失效方式不必复制真实芯片的内部电路。这里没有把多核 TLB shootdown 作为本次已验证项目。
+
+### 六、答辩时如何结合代码回答
+
+**问：你们实际观察了什么？**
+
+答：用宿主 GDB 跟踪 QEMU 的地址翻译实现，在 `get_physical_address` 观察根页表、索引和 PTE；确认顶级叶子将内核虚拟地址映射到物理地址；再观察 `tlb_set_page` 填充，最后通过下一次查询跳过 `tlb_fill` 分支证明命中。
+
+**问：为什么是三级页表却只读了一项？**
+
+答：Sv39 最多三级，本次根页表项已经是叶子，对应 1 GiB 大页，不必继续读取下两级。
+
+**问：为什么物理地址输出少了 d8？**
+
+答：本版本分页翻译函数给软件 TLB 返回的是 4 KiB 页基址 `0x80200000`；加上原地址页内偏移 `0xd8` 才是完整地址 `0x802000d8`。
+
+**问：TLB 是不是缓存数据？**
+
+答：主要缓存地址翻译和相关访问属性；数据缓存缓存数据内容，两者用途不同。
+
+**问：SLUB 的 freelist 空了怎么办？**
+
+答：寻找可用的 partial slab；还不够就向页分配器申请新页并初始化对象槽位；底层分配失败则返回失败。本实验实现的是页分配器和 Buddy，SLUB 只做了原理分析。
+
+**问：释放对象是否马上归还物理页？**
+
+答：通常先回到对象空闲链表。必须确认整个 slab 无活跃对象，且满足回收策略，才能将底层页归还。
+
+**问：软件 TLB 与硬件 TLB 最大区别？**
+
+答：两者都用于复用翻译结果，但真实硬件完成机器内的虚拟到物理翻译；QEMU 还要把客体内存关联到宿主进程内存，用软件标签和 `addend` 加速模拟访问。本次不能据此推断真实芯片的缓存容量和访问周期。
+
+### 七、补充资料与源码定位
+
+- 课程手册：[操作系统实验指导书](http://oslab.mobisys.top/lab2026/_book/)。实验范围应以对应 Lab2 页面及教师要求为准。
+- Linux：[Slab Allocation](https://docs.kernel.org/mm/slab.html)、[Memory Management APIs](https://docs.kernel.org/core-api/mm-api.html)。Linux 接口与实现仅用于原理参照，不当作本实验已实现接口。
+- RISC-V：[ISA 手册项目](https://github.com/riscv/riscv-isa-manual)，参看特权架构中 `satp`、Sv39 与 `SFENCE.VMA`。
+- QEMU 本地源码：`/opt/riscv/qemu-4.1.1/target/riscv/cpu_helper.c`，重点为 `get_physical_address` 和 `riscv_cpu_tlb_fill`。
+- QEMU 本地源码：`/opt/riscv/qemu-4.1.1/accel/tcg/cputlb.c`，重点为 `tlb_set_page_with_attrs`、`tlb_set_page` 和 `get_page_addr_code`。
+- ucore：[启动页表](kern/init/entry.S)、[物理页管理接口](kern/mm/pmm.c)、[Buddy 实现](kern/mm/buddy_pmm.c)。
+
+<!-- LAB2_GDB_SLUB_TLB_SUPPLEMENT_END -->
