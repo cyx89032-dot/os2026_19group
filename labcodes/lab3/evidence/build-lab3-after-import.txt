@@ -1,0 +1,28 @@
++ cc kern/mm/best_fit_pmm.c
++ cc kern/mm/default_pmm.c
++ cc kern/mm/pmm.c
+kern/mm/pmm.c: In function 'page_init':
+kern/mm/pmm.c:109:20: error: 'KERNEL_BEGIN_PADDR' undeclared (first use in this function)
+  109 |         mem_base > KERNEL_BEGIN_PADDR ||
+      |                    ^~~~~~~~~~~~~~~~~~
+kern/mm/pmm.c:109:20: note: each undeclared identifier is reported only once for each function it appears in
+kern/mm/pmm.c:116:19: error: 'PHYSICAL_MEMORY_END' undeclared (first use in this function); did you mean 'PHYSICAL_MEMORY_OFFSET'?
+  116 |         mem_end < PHYSICAL_MEMORY_END
+      |                   ^~~~~~~~~~~~~~~~~~~
+      |                   PHYSICAL_MEMORY_OFFSET
+kern/mm/pmm.c: At top level:
+kern/mm/pmm.c:167:14: error: redefinition of 'page_init'
+  167 | }static void page_init(void) {
+      |              ^~~~~~~~~
+kern/mm/pmm.c:84:13: note: previous definition of 'page_init' was here
+   84 | static void page_init(void) {
+      |             ^~~~~~~~~
+kern/mm/pmm.c: In function 'page_init':
+kern/mm/pmm.c:192:20: error: 'KERNEL_BEGIN_PADDR' undeclared (first use in this function)
+  192 |         mem_base > KERNEL_BEGIN_PADDR ||
+      |                    ^~~~~~~~~~~~~~~~~~
+kern/mm/pmm.c:199:19: error: 'PHYSICAL_MEMORY_END' undeclared (first use in this function); did you mean 'PHYSICAL_MEMORY_OFFSET'?
+  199 |         mem_end < PHYSICAL_MEMORY_END
+      |                   ^~~~~~~~~~~~~~~~~~~
+      |                   PHYSICAL_MEMORY_OFFSET
+make: *** [Makefile:118: obj/kern/mm/pmm.o] Error 1
